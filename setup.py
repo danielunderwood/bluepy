@@ -16,15 +16,13 @@ def pre_install():
     """
     try:
         print("Working dir is " + os.getcwd())
-        for cmd in ["git submodule update --init",
-                    "cd ./bluez",
-                    "./bootstrap",
-                    "./configure",
-                    "cd $OLDPWD",
-                    "make -C ./bluepy clean",
-                    "make -C bluepy -j1"]:
+        for cmd, path in [("git submodule update --init", ""),
+                          ("./bootstrap", "./bluez"),
+                          ("./configure", "./bluez"),
+                          ("make -C ./bluepy clean", ""),
+                          ("make -C bluepy -j1", "")]:
             print("execute " + cmd)
-            msgs = subprocess.check_output(shlex.split(cmd), stderr=subprocess.STDOUT)
+            msgs = subprocess.check_output(shlex.split(cmd), stderr=subprocess.STDOUT, cwd=path or os.getcwd())
     except subprocess.CalledProcessError as e:
         print("Failed to compile bluepy-helper. Exiting install.")
         print("Command was " + repr(cmd) + " in " + os.getcwd())
