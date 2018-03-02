@@ -17,8 +17,10 @@ def pre_install():
     try:
         print("Working dir is " + os.getcwd())
         for cmd in ["git submodule update --init",
-                    "cd ./bluez && ./bootstrap && cd $OLDPWD",
-                    "cd ./bluez && ./configure && cd $OLDPWD",
+                    "cd ./bluez",
+                    "./bootstrap",
+                    "./configure",
+                    "cd $OLDPWD",
                     "make -C ./bluepy clean",
                     "make -C bluepy -j1"]:
             print("execute " + cmd)
