@@ -1,4 +1,4 @@
-BLUEZ_PATH=./bluez-5.29
+BLUEZ_PATH=../bluez
 
 BLUEZ_SRCS  = lib/bluetooth.c lib/hci.c lib/sdp.c lib/uuid.c
 BLUEZ_SRCS += attrib/att.c attrib/gatt.c attrib/gattrib.c attrib/utils.c
@@ -27,15 +27,6 @@ all: bluepy-helper
 bluepy-helper: $(LOCAL_SRCS) $(IMPORT_SRCS)
 	$(CC) -L. $(CFLAGS) $(CPPFLAGS) -o $@ $(LOCAL_SRCS) $(IMPORT_SRCS) $(LDLIBS)
 
-$(IMPORT_SRCS): bluez-src.tgz
-	tar xzf $<
-	touch $(IMPORT_SRCS)
-
-.PHONY: bluez-tarfile
-
-bluez-tarfile:
-	(cd ..; tar czf bluepy/bluez-src.tgz bluez-5.29)
-
 GET_SERVICES=get_services.py
 
 uuids.json: $(GET_SERVICES)
@@ -45,7 +36,7 @@ TAGS: *.c $(BLUEZ_PATH)/attrib/*.[ch] $(BLUEZ_PATH)/btio/*.[ch]
 	etags $^
 
 clean:
-	rm -rf *.o bluepy-helper TAGS ./bluez-5.29
+	rm -rf *.o bluepy-helper TAGS ./bluez
 
 
 

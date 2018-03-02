@@ -16,7 +16,11 @@ def pre_install():
     """
     try:
         print("Working dir is " + os.getcwd())
-        for cmd in ["git submodule update --init", "make -C ./bluepy clean", "make -C bluepy -j1"]:
+        for cmd in ["git submodule update --init",
+                    "./bluez/bootstrap",
+                    "./bluez/configure",
+                    "make -C ./bluepy clean",
+                    "make -C bluepy -j1"]:
             print("execute " + cmd)
             msgs = subprocess.check_output(shlex.split(cmd), stderr=subprocess.STDOUT)
     except subprocess.CalledProcessError as e:
