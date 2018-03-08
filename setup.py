@@ -70,25 +70,25 @@ setup_cmdclass = {
 try:
     from wheel.bdist_wheel import bdist_wheel
 
+
     class BluepyBdistWheel(bdist_wheel):
         def finalize_options(self):
             bdist_wheel.finalize_options(self)
             self.root_is_pure = False
 
+
     setup_cmdclass['bdist_wheel'] = BluepyBdistWheel
 except ImportError:
     pass
 
-
-setup (
+setup(
     name='bluepy',
-    version='1.1.2',
+    version='1.1.3',
     description='Python module for interfacing with BLE devices through Bluez',
-    author='Ian Harvey',
-    author_email='website-contact@fenditton.org',
-    url='https://github.com/IanHarvey/bluepy',
-    download_url='https://github.com/IanHarvey/bluepy/tarball/v/1.1.2',
-    keywords=[ 'Bluetooth', 'Bluetooth Smart', 'BLE', 'Bluetooth Low Energy' ],
+    author='Ian Harvey, Daniel Underwood',
+    author_email='website-contact@fenditton.org, daniel.underwood13@gmail.com',
+    url='https://github.com/danielunderwood/bluepy',
+    keywords=['Bluetooth', 'Bluetooth Smart', 'BLE', 'Bluetooth Low Energy'],
     classifiers=[
         'Programming Language :: Python :: 2.7',
         'Programming Language :: Python :: 3.3',
@@ -96,7 +96,7 @@ setup (
     ],
     packages=['bluepy'],
     package_data={
-        'bluepy': ['bluepy-helper', '*.json', 'bluez-src.tgz', 'bluepy-helper.c', 'Makefile']
+        'bluepy': ['bluepy-helper', '*.json', 'bluepy-helper.c', 'Makefile']
     },
     cmdclass=setup_cmdclass,
     entry_points={
