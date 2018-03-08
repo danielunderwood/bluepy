@@ -1,7 +1,7 @@
 bluepy
 ======
 
-Python interface to Bluetooth LE on Linux
+A fork of (IanHarvey/bluepy)[https://github.com/ianharvey/bluepy].
 
 This is a project to provide an API to allow access to Bluetooth Low Energy devices
 from Python. At present it runs on Linux only; I've mostly developed it using a
@@ -17,33 +17,15 @@ in thingy52.py (https://www.nordicsemi.com/eng/Products/Nordic-Thingy-52).
 Installation
 ------------
 
-The code needs an executable `bluepy-helper` to be compiled from C source. This is done
-automatically if you use the recommended pip installation method (see below). Otherwise,
-you can rebuild it using the Makefile in the `bluepy` directory.
-
-To install the current released version, on most Debian-based systems:
-
-    $ sudo apt-get install python-pip libglib2.0-dev
-    $ sudo pip install bluepy
-    
-If you find `bluepy-helper` isn't being built, please try:
-
-    $ sudo pip install --no-binary :all: bluepy
-
-before reporting any issues.
-
-For Python 3, you may need to use `pip3`:
-
-    $ sudo apt-get install python3-pip libglib2.0-dev
-    $ sudo pip3 install bluepy
+At the current time, this fork must be built manually and is not available on PyPI.
 
 To install the source and build locally:
 
-    $ sudo apt-get install git build-essential libglib2.0-dev
+    $ sudo apt-get install git build-essential libglib2.0-dev automake libreadline-dev libtool libdbus-dev libudev-dev libical-dev libbluetooth-dev
     $ git clone https://github.com/IanHarvey/bluepy.git
     $ cd bluepy
     $ python setup.py build
-    $ sudo python setup.py install
+    $ python setup.py install
 
 I would recommend having command-line tools from BlueZ available for debugging. There
 are instructions for building BlueZ on the Raspberry Pi at http://www.elinux.org/RPi_Bluetooth_LE.
