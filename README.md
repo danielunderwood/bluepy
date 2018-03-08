@@ -1,7 +1,7 @@
 bluepy
 ======
 
-A fork of (IanHarvey/bluepy)[https://github.com/ianharvey/bluepy].
+A fork of [IanHarvey/bluepy](https://github.com/ianharvey/bluepy).
 
 This is a project to provide an API to allow access to Bluetooth Low Energy devices
 from Python. At present it runs on Linux only; I've mostly developed it using a
