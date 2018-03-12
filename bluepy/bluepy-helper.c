@@ -34,7 +34,7 @@
 
 
 #include "lib/bluetooth.h"
-#include "lib/bluetooth/sdp.h"
+#include "lib/sdp.h"
 #include "lib/hci.h"
 #include "lib/hci_lib.h"
 #include "lib/uuid.h"
