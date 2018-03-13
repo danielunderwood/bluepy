@@ -193,19 +193,7 @@ static void send_data(const unsigned char *val, size_t len)
 static void send_addr(const struct mgmt_addr_info *addr)
 {
     const uint8_t *val = addr->bdaddr.b;
-    printf(" %s=b", tag_ADDR);
-    int len = 6;
-    /* Human-readable byte order is reverse of bdaddr.b */
-    while ( len-- > 0 )
-        printf("%02X", val[len]);
-
-    send_uint(tag_TYPE, addr->type);
-}
-
-static void send_addr(const struct mgmt_addr_info *addr)
-{
-    const uint8_t *val = addr->bdaddr.b;
-    printf(RESP_DELIM "%s=b", tag_ADDR);
+    printf("%s=b", tag_ADDR);
     int len = 6;
     /* Human-readable byte order is reverse of bdaddr.b */
     while ( len-- > 0 )
@@ -378,7 +366,7 @@ static void connect_cb(GIOChannel *io, GError *err, gpointer user_data)
     else if (cid == ATT_CID)
         mtu = ATT_DEFAULT_LE_MTU;
 
-    attrib = g_attrib_new(iochannel, mtu);
+    attrib = g_attrib_new(iochannel, mtu, false);
 
     g_attrib_register(attrib, ATT_OP_HANDLE_NOTIFY, GATTRIB_ALL_HANDLES,
                         events_handler, attrib, NULL);
@@ -1641,7 +1629,7 @@ static void cmd_gatts(int argcp, char **argvp)
         if (opdu && (opt_mtu == 0 || olen <= opt_mtu) &&
             !(opdu[0] == BT_ATT_OP_MTU_REQ ||
               opdu[0] == BT_ATT_OP_FIND_INFO_REQ ||
-              opdu[0] == BT_ATT_OP_FIND_BY_TYPE_VAL_REQ ||
+              opdu[0] == BT_ATT_OP_FIND_BY_TYPE_REQ ||
               opdu[0] == BT_ATT_OP_READ_BY_TYPE_REQ ||
               opdu[0] == BT_ATT_OP_READ_REQ ||
               opdu[0] == BT_ATT_OP_READ_BLOB_REQ ||
@@ -1958,7 +1946,7 @@ static int parse_dev_src(const char * arg, gchar **addr, int *index)
     return 0;
 }
 
-static void mgmt_setup(unsigned int idx)
+int main(int argc, char ** argv)
 {
     GIOChannel *pchan;
     gint events;
