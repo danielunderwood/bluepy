@@ -2,7 +2,7 @@ BLUEZ_PATH=../bluez
 
 BLUEZ_SRCS  = lib/bluetooth.c lib/hci.c lib/sdp.c lib/uuid.c
 BLUEZ_SRCS += attrib/att.c attrib/gatt.c attrib/gattrib.c attrib/utils.c
-BLUEZ_SRCS += btio/btio.c src/log.c src/shared/mgmt.c  
+BLUEZ_SRCS += btio/btio.c src/log.c src/shared/mgmt.c
 BLUEZ_SRCS += src/shared/crypto.c src/shared/att.c src/shared/queue.c src/shared/util.c
 BLUEZ_SRCS += src/shared/io-glib.c src/shared/timeout-glib.c
 
@@ -12,19 +12,17 @@ LOCAL_SRCS  = bluepy-helper.c
 CC = gcc
 CFLAGS = -Os -g -Wall # -Werror
 
-CPPFLAGS = -DHAVE_CONFIG_H
-ifneq ($(DEBUGGING),)
-CFLAGS += -DBLUEPY_DEBUG=1
-endif
+CPPFLAGS = -DHAVE_CONFIG_H -DBLUEPY_DEBUG
+#CPPFLAGS = -DHAVE_CONFIG_H
 
 CPPFLAGS += -I$(BLUEZ_PATH)/attrib -I$(BLUEZ_PATH) -I$(BLUEZ_PATH)/lib -I$(BLUEZ_PATH)/src -I$(BLUEZ_PATH)/gdbus -I$(BLUEZ_PATH)/btio
 
 CPPFLAGS += $(shell pkg-config glib-2.0 --cflags)
 LDLIBS += $(shell pkg-config glib-2.0 --libs)
 
-all: bluepy-helper 
+all: bluepy-helper
 
-bluepy-helper: $(LOCAL_SRCS) $(IMPORT_SRCS)
+bluepy-helper: $(LOCAL_SRCS) $(IMPORT_SRCS) Makefile
 	$(CC) -L. $(CFLAGS) $(CPPFLAGS) -o $@ $(LOCAL_SRCS) $(IMPORT_SRCS) $(LDLIBS)
 
 GET_SERVICES=get_services.py

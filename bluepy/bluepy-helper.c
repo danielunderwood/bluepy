@@ -35,9 +35,12 @@
 
 #include "lib/bluetooth.h"
 #include "lib/sdp.h"
+#include "lib/hci.h"
+#include "lib/hci_lib.h"
 #include "lib/uuid.h"
 #include "lib/mgmt.h"
 #include "src/shared/mgmt.h"
+#include "src/shared/att.h"
 
 #include <btio/btio.h>
 #include "att.h"
@@ -48,7 +51,7 @@
 #define IO_CAPABILITY_NOINPUTNOOUTPUT   0x03
 
 #ifdef BLUEPY_DEBUG
-#define DBG(fmt, ...) do {printf("# %s() :" fmt "\n", __FUNCTION__, ##__VA_ARGS__); fflush(stdout); \
+#define DBG(fmt, ...) do {printf("# %s(): " fmt "\n", __FUNCTION__, ##__VA_ARGS__); fflush(stdout); \
     } while(0)
 #else
 #ifdef BLUEPY_DEBUG_FILE_LOG
@@ -72,6 +75,7 @@ static GAttrib *attrib = NULL;
 static GMainLoop *event_loop;
 
 static gchar *opt_src = NULL;
+static int opt_src_idx = MGMT_INDEX_NONE; // same as HCI_DEV_NONE
 static gchar *opt_dst = NULL;
 static gchar *opt_dst_type = NULL;
 static gchar *opt_sec_level = NULL;
@@ -82,6 +86,7 @@ static int end;
 
 static uint16_t mgmt_ind = MGMT_INDEX_NONE;
 static struct mgmt *mgmt_master = NULL;
+static struct mgmt_rp_read_info dev_info;
 
 static int hci_dd = -1;
 static GIOChannel *hci_io = NULL;
@@ -100,94 +105,95 @@ static enum state {
     STATE_CONNECTING=1,
     STATE_CONNECTED=2,
     STATE_SCANNING=3,
+    STATE_ADVERTISING=4,
 } conn_state;
 
 
-static const char 
-  *tag_RESPONSE  = "rsp",
-  *tag_ERRCODE   = "code",
-  *tag_ERRSTAT   = "estat",
-  *tag_ERRMSG    = "emsg",
-  *tag_HANDLE    = "hnd",
-  *tag_UUID      = "uuid",
-  *tag_DATA      = "d",
-  *tag_CONNSTATE = "state",
-  *tag_SEC_LEVEL = "sec",
-  *tag_MTU       = "mtu",
-  *tag_DEVICE    = "dst",
-  *tag_RANGE_START = "hstart",
-  *tag_RANGE_END = "hend",
-  *tag_PROPERTIES= "props",
-  *tag_VALUE_HANDLE = "vhnd",
-  *tag_ADDR       = "addr",
-  *tag_TYPE       = "type",
-  *tag_RSSI       = "rssi",
-  *tag_FLAG       = "flag";
+static const char
+    *tag_RESPONSE   = "rsp",
+    *tag_ERRCODE    = "code",
+    *tag_BT_ERR     = "bterr",
+    *tag_HANDLE     = "hnd",
+    *tag_UUID       = "uuid",
+    *tag_DATA       = "d",
+    *tag_CONNSTATE  = "state",
+    *tag_SEC_LEVEL  = "sec",
+    *tag_MTU        = "mtu",
+    *tag_DEVICE     = "dst",
+    *tag_RANGE_START = "hstart",
+    *tag_RANGE_END  = "hend",
+    *tag_PROPERTIES = "props",
+    *tag_VALUE_HANDLE = "vhnd",
+    *tag_ADDR       = "addr",
+    *tag_TYPE       = "type",
+    *tag_RSSI       = "rssi",
+    *tag_FLAG       = "flag";
 
 static const char
-  *rsp_ERROR     = "err",
-  *rsp_STATUS    = "stat",
-  *rsp_NOTIFY    = "ntfy",
-  *rsp_IND       = "ind",
-  *rsp_DISCOVERY = "find",
-  *rsp_DESCRIPTORS = "desc",
-  *rsp_READ      = "rd",
-  *rsp_WRITE     = "wr",
-  *rsp_MGMT      = "mgmt",
-  *rsp_SCAN      = "scan";
+    *rsp_ERROR      = "err",
+    *rsp_STATUS     = "stat",
+    *rsp_NOTIFY     = "ntfy",
+    *rsp_IND        = "ind",
+    *rsp_DISCOVERY  = "find",
+    *rsp_DESCRIPTORS = "desc",
+    *rsp_READ       = "rd",
+    *rsp_WRITE      = "wr",
+    *rsp_MGMT       = "mgmt",
+    *rsp_SCAN       = "scan",
+    *rsp_GATTS      = "gatts";
 
 static const char
-  *err_CONN_FAIL = "connfail",
-  *err_COMM_ERR  = "comerr",
-  *err_PROTO_ERR = "protoerr",
-  *err_NOT_FOUND = "notfound",
-  *err_BAD_CMD   = "badcmd",
-  *err_BAD_PARAM = "badparam",
-  *err_BAD_STATE = "badstate",
-  *err_BUSY      = "busy",
-  *err_NO_MGMT   = "nomgmt",
-  *err_SUCCESS   = "success";
+    *err_CONN_FAIL  = "connfail",
+    *err_COMM_ERR   = "comerr",
+    *err_PROTO_ERR  = "protoerr",
+    *err_NOT_FOUND  = "notfound",
+    *err_BAD_CMD    = "badcmd",
+    *err_BAD_PARAM  = "badparam",
+    *err_BAD_STATE  = "badstate",
+    *err_BAD_HCI    = "badhci",
+    *err_BUSY       = "busy",
+    *err_NO_MGMT    = "nomgmt",
+    *err_SUCCESS    = "success";
 
-static const char 
-  *st_DISCONNECTED = "disc",
-  *st_CONNECTING   = "tryconn",
-  *st_CONNECTED    = "conn",
-  *st_SCANNING    = "scan";
-
-// delimits fields in response message
-#define RESP_DELIM "\x1e"
+static const char
+    *st_DISCONNECTED = "disc",
+    *st_CONNECTING  = "tryconn",
+    *st_CONNECTED   = "conn",
+    *st_SCANNING    = "scan",
+    *st_ADVERTISING = "advertise";
 
 static void resp_begin(const char *rsptype)
 {
-  printf("%s=$%s", tag_RESPONSE, rsptype);
+    printf("%s=$%s", tag_RESPONSE, rsptype);
 }
 
 static void send_sym(const char *tag, const char *val)
 {
-  printf(RESP_DELIM "%s=$%s", tag, val);
+    printf(" %s=$%s", tag, val);
 }
 
 static void send_uint(const char *tag, unsigned int val)
 {
-  printf(RESP_DELIM "%s=h%X", tag, val);
+    printf(" %s=h%X", tag, val);
 }
 
 static void send_str(const char *tag, const char *val)
 {
-  printf(RESP_DELIM "%s='%s", tag, val);
+    //!!FIXME
+    printf(" %s='%s", tag, val);
 }
 
 static void send_data(const unsigned char *val, size_t len)
 {
-  printf(RESP_DELIM "%s=b", tag_DATA);
-  while ( len-- > 0 )
-    printf("%02X", *val++);
+    printf(" %s=b", tag_DATA);
+    while ( len-- > 0 )
+        printf("%02X", *val++);
 }
 
 static void send_addr(const struct mgmt_addr_info *addr)
 {
     const uint8_t *val = addr->bdaddr.b;
-    printf(RESP_DELIM "%s=b", tag_ADDR);
+    printf("%s=b", tag_ADDR);
     int len = 6;
     /* Human-readable byte order is reverse of bdaddr.b */
     while ( len-- > 0 )
@@ -198,70 +204,93 @@ static void send_addr(const struct mgmt_addr_info *addr)
 
 static void resp_end()
 {
-  printf("\n");
-  fflush(stdout);
+    printf("\n");
+    fflush(stdout);
 }
 
 static void resp_error(const char *errcode)
 {
-  resp_begin(rsp_ERROR);
-  send_sym(tag_ERRCODE, errcode);
-  resp_end();
+    resp_begin(rsp_ERROR);
+    send_sym(tag_ERRCODE, errcode);
+    resp_end();
 }
 
-static void resp_errstat(const char *errcode, uint8_t status)
+static void resp_error_comm(unsigned int bt_err)
 {
-  resp_begin(rsp_ERROR);
-  send_sym(tag_ERRCODE, errcode);
-  send_uint(tag_ERRSTAT, status);
-  send_str(tag_ERRMSG, att_ecode2str(status));
-  resp_end();
+    resp_begin(rsp_ERROR);
+    send_sym(tag_ERRCODE, err_COMM_ERR);
+    // BT error code (BT spec Vol2 PartD) or 0 if NA
+    send_uint(tag_BT_ERR, bt_err);
+    resp_end();
 }
 
 static void resp_mgmt(const char *errcode)
 {
-  resp_begin(rsp_MGMT);
-  send_sym(tag_ERRCODE, errcode);
-  resp_end();
+    resp_begin(rsp_MGMT);
+    send_sym(tag_ERRCODE, errcode);
+    resp_end();
 }
 
-static void resp_mgmtstat(const char *errcode, uint8_t status)
+static void resp_mgmt_with_data(unsigned int data)
 {
-  resp_begin(rsp_MGMT);
-  send_sym(tag_ERRCODE, errcode);
-  send_uint(tag_ERRSTAT, status);
-  send_str(tag_ERRMSG, mgmt_errstr(status));
-  resp_end();
+    resp_begin(rsp_MGMT);
+    send_sym(tag_ERRCODE, err_SUCCESS);
+    send_uint(tag_DATA, data);
+    resp_end();
 }
 
 static void cmd_status(int argcp, char **argvp)
 {
-  resp_begin(rsp_STATUS);
-  switch(conn_state)
-  {
+    resp_begin(rsp_STATUS);
+    switch(conn_state)
+    {
     case STATE_CONNECTING:
-      send_sym(tag_CONNSTATE, st_CONNECTING);
-      send_str(tag_DEVICE, opt_dst);
-      break;
+        send_sym(tag_CONNSTATE, st_CONNECTING);
+        send_str(tag_DEVICE, opt_dst);
+        break;
 
     case STATE_CONNECTED:
-      send_sym(tag_CONNSTATE, st_CONNECTED);
-      send_str(tag_DEVICE, opt_dst);
-      break;
+        send_sym(tag_CONNSTATE, st_CONNECTED);
+        send_str(tag_DEVICE, opt_dst);
+        break;
 
     case STATE_SCANNING:
-      send_sym(tag_CONNSTATE, st_SCANNING);
-      send_str(tag_DEVICE, opt_dst);
-      break;
+        send_sym(tag_CONNSTATE, st_SCANNING);
+        send_str(tag_DEVICE, opt_dst);
+        break;
+
+    case STATE_ADVERTISING:
+        send_sym(tag_CONNSTATE, st_ADVERTISING);
+        send_str(tag_DEVICE, opt_dst);
+        break;
 
     default:
-      send_sym(tag_CONNSTATE, st_DISCONNECTED);
-      break;
-  }
+        send_sym(tag_CONNSTATE, st_DISCONNECTED);
+        break;
+    }
 
-  send_uint(tag_MTU, opt_mtu);
-  send_str(tag_SEC_LEVEL, opt_sec_level);
-  resp_end();
+    send_uint(tag_MTU, opt_mtu);
+    send_str(tag_SEC_LEVEL, opt_sec_level);
+    resp_end();
+}
+
+static void cmd_info(int argcp, char **argvp)
+{
+    struct hci_dev_info di = { 0 };
+    char s[18];
+
+    hci_devinfo(opt_src_idx, &di);
+
+    if (ba2str(&di.bdaddr, s) != 17)
+        memset(s, 0xFF, sizeof(s) - 1);
+
+    resp_begin(rsp_MGMT);
+    send_sym(tag_ERRCODE, err_SUCCESS);
+    /* Always returns the programmed public bdaddr of the device */
+    send_str(tag_ADDR, s);
+    send_str(tag_TYPE, "public");
+
+    resp_end();
 }
 
 static void set_state(enum state st)
@@ -303,201 +332,13 @@ static void events_handler(const uint8_t *pdu, uint16_t len, gpointer user_data)
         g_attrib_send(attrib, 0, opdu, olen, NULL, NULL, NULL);
 }
 
-static void gatts_find_info_req(const uint8_t *pdu, uint16_t len, gpointer user_data)
+static void req_gatts(const uint8_t *val, uint16_t len, gpointer user_data)
 {
-    uint8_t *opdu;
-    uint8_t opcode;
-    uint16_t starting_handle, olen;
-    size_t plen;
-
-    assert( len == 5 );
-    opcode = pdu[0];
-    starting_handle = bt_get_le16(&pdu[1]);
-    /* ending_handle = bt_get_le16(&pdu[3]); */
-
-    opdu = g_attrib_get_buffer(attrib, &plen);
-    olen = enc_error_resp(opcode, starting_handle, ATT_ECODE_REQ_NOT_SUPP, opdu, plen);
-    if (olen > 0)
-        g_attrib_send(attrib, 0, opdu, olen, NULL, NULL, NULL);
+    resp_begin(rsp_GATTS);
+    send_data(val, len);
+    resp_end();
 }
 
-static void gatts_find_by_type_req(const uint8_t *pdu, uint16_t len, gpointer user_data)
-{
-    uint8_t *opdu;
-    uint8_t opcode;
-    uint16_t starting_handle, olen;
-    size_t plen;
-
-    assert( len >= 7 );
-    opcode = pdu[0];
-    starting_handle = bt_get_le16(&pdu[1]);
-    /* ending_handle = bt_get_le16(&pdu[3]); */
-    /* att_type = bt_get_le16(&pdu[5]); */
-
-    opdu = g_attrib_get_buffer(attrib, &plen);
-    olen = enc_error_resp(opcode, starting_handle, ATT_ECODE_REQ_NOT_SUPP, opdu, plen);
-    if (olen > 0)
-        g_attrib_send(attrib, 0, opdu, olen, NULL, NULL, NULL);
-}
-
-static void gatts_read_by_type_req(const uint8_t *pdu, uint16_t len, gpointer user_data)
-{
-    uint8_t *opdu;
-    uint8_t opcode;
-    uint16_t starting_handle, olen;
-    size_t plen;
-
-    assert( len == 7 || len == 21 );
-    opcode = pdu[0];
-    starting_handle = bt_get_le16(&pdu[1]);
-    /* ending_handle = bt_get_le16(&pdu[3]); */
-    if (len == 7) {
-        /* att_type = bt_get_le16(&pdu[5]); */
-    }
-
-    opdu = g_attrib_get_buffer(attrib, &plen);
-    olen = enc_error_resp(opcode, starting_handle, ATT_ECODE_REQ_NOT_SUPP, opdu, plen);
-    if (olen > 0)
-        g_attrib_send(attrib, 0, opdu, olen, NULL, NULL, NULL);
-}
-
-static void gatts_read_req(const uint8_t *pdu, uint16_t len, gpointer user_data)
-{
-    uint8_t *opdu;
-    uint8_t opcode;
-    uint16_t handle, olen;
-    size_t plen;
-
-    assert( len == 3 );
-    opcode = pdu[0];
-    handle = bt_get_le16(&pdu[1]);
-
-    opdu = g_attrib_get_buffer(attrib, &plen);
-    olen = enc_error_resp(opcode, handle, ATT_ECODE_REQ_NOT_SUPP, opdu, plen);
-    if (olen > 0)
-        g_attrib_send(attrib, 0, opdu, olen, NULL, NULL, NULL);
-}
-
-static void gatts_read_blob_req(const uint8_t *pdu, uint16_t len, gpointer user_data)
-{
-    uint8_t *opdu;
-    uint8_t opcode;
-    uint16_t handle, olen;
-    size_t plen;
-
-    assert( len == 5 );
-    opcode = pdu[0];
-    handle = bt_get_le16(&pdu[1]);
-    /* offset = bt_get_le16(&pdu[3]); */
-
-    opdu = g_attrib_get_buffer(attrib, &plen);
-    olen = enc_error_resp(opcode, handle, ATT_ECODE_REQ_NOT_SUPP, opdu, plen);
-    if (olen > 0)
-        g_attrib_send(attrib, 0, opdu, olen, NULL, NULL, NULL);
-}
-
-static void gatts_read_multi_req(const uint8_t *pdu, uint16_t len, gpointer user_data)
-{
-    uint8_t *opdu;
-    uint8_t opcode;
-    uint16_t handle1, olen;
-    size_t plen;
-
-    assert( len >= 5 );
-    opcode = pdu[0];
-    handle1 = bt_get_le16(&pdu[1]);
-    /* handle2 = bt_get_le16(&pdu[3]); */
-
-    opdu = g_attrib_get_buffer(attrib, &plen);
-    olen = enc_error_resp(opcode, handle1, ATT_ECODE_REQ_NOT_SUPP, opdu, plen);
-    if (olen > 0)
-        g_attrib_send(attrib, 0, opdu, olen, NULL, NULL, NULL);
-}
-
-static void gatts_read_by_group_req(const uint8_t *pdu, uint16_t len, gpointer user_data)
-{
-    uint8_t *opdu;
-    uint8_t opcode;
-    uint16_t starting_handle, olen;
-    size_t plen;
-
-    assert( len >= 7 );
-    opcode = pdu[0];
-    starting_handle = bt_get_le16(&pdu[1]);
-    /* ending_handle = bt_get_le16(&pdu[3]); */
-    /* att_group_type = bt_get_le16(&pdu[5]); */
-
-    opdu = g_attrib_get_buffer(attrib, &plen);
-    olen = enc_error_resp(opcode, starting_handle, ATT_ECODE_REQ_NOT_SUPP, opdu, plen);
-    if (olen > 0)
-        g_attrib_send(attrib, 0, opdu, olen, NULL, NULL, NULL);
-}
-
-static void gatts_write_req(const uint8_t *pdu, uint16_t len, gpointer user_data)
-{
-    uint8_t *opdu;
-    uint8_t opcode;
-    uint16_t handle, olen;
-    size_t plen;
-
-    assert( len >= 3 );
-    opcode = pdu[0];
-    handle = bt_get_le16(&pdu[1]);
-
-    opdu = g_attrib_get_buffer(attrib, &plen);
-    olen = enc_error_resp(opcode, handle, ATT_ECODE_REQ_NOT_SUPP, opdu, plen);
-    if (olen > 0)
-        g_attrib_send(attrib, 0, opdu, olen, NULL, NULL, NULL);
-}
-
-static void gatts_write_cmd(const uint8_t *pdu, uint16_t len, gpointer user_data)
-{
-    assert( len >= 3 );
-    /* opcode = pdu[0]; */
-    /* handle = bt_get_le16(&pdu[1]); */
-}
-
-static void gatts_signed_write_cmd(const uint8_t *pdu, uint16_t len, gpointer user_data)
-{
-    assert( len >= 15 );
-    /* opcode = pdu[0]; */
-    /* handle = bt_get_le16(&pdu[1]); */
-}
-
-static void gatts_prep_write_req(const uint8_t *pdu, uint16_t len, gpointer user_data)
-{
-    uint8_t *opdu;
-    uint8_t opcode, handle;
-    uint16_t olen;
-    size_t plen;
-
-    assert( len >= 5 );
-    opcode = pdu[0];
-    handle = bt_get_le16(&pdu[1]);
-    /* offset = bt_get_le16(&pdu[3]); */
-
-    opdu = g_attrib_get_buffer(attrib, &plen);
-    olen = enc_error_resp(opcode, handle, ATT_ECODE_REQ_NOT_SUPP, opdu, plen);
-    if (olen > 0)
-        g_attrib_send(attrib, 0, opdu, olen, NULL, NULL, NULL);
-}
-
-static void gatts_exec_write_req(const uint8_t *pdu, uint16_t len, gpointer user_data)
-{
-    uint8_t *opdu;
-    uint8_t opcode;
-    uint16_t olen;
-    size_t plen;
-
-    assert( len == 5 );
-    opcode = pdu[0];
-    /* flags = pdu[1]; */
-
-    opdu = g_attrib_get_buffer(attrib, &plen);
-    olen = enc_error_resp(opcode, 0, ATT_ECODE_REQ_NOT_SUPP, opdu, plen);
-    if (olen > 0)
-        g_attrib_send(attrib, 0, opdu, olen, NULL, NULL, NULL);
-}
 
 static void connect_cb(GIOChannel *io, GError *err, gpointer user_data)
 {
@@ -532,29 +373,29 @@ static void connect_cb(GIOChannel *io, GError *err, gpointer user_data)
     g_attrib_register(attrib, ATT_OP_HANDLE_IND, GATTRIB_ALL_HANDLES,
                         events_handler, attrib, NULL);
     g_attrib_register(attrib, ATT_OP_FIND_INFO_REQ, GATTRIB_ALL_HANDLES,
-                      gatts_find_info_req, attrib, NULL);
+                        req_gatts, NULL, NULL);
     g_attrib_register(attrib, ATT_OP_FIND_BY_TYPE_REQ, GATTRIB_ALL_HANDLES,
-                      gatts_find_by_type_req, attrib, NULL);
+                        req_gatts, NULL, NULL);
     g_attrib_register(attrib, ATT_OP_READ_BY_TYPE_REQ, GATTRIB_ALL_HANDLES,
-                      gatts_read_by_type_req, attrib, NULL);
+                        req_gatts, NULL, NULL);
     g_attrib_register(attrib, ATT_OP_READ_REQ, GATTRIB_ALL_HANDLES,
-                      gatts_read_req, attrib, NULL);
+                        req_gatts, NULL, NULL);
     g_attrib_register(attrib, ATT_OP_READ_BLOB_REQ, GATTRIB_ALL_HANDLES,
-                      gatts_read_blob_req, attrib, NULL);
+                        req_gatts, NULL, NULL);
     g_attrib_register(attrib, ATT_OP_READ_MULTI_REQ, GATTRIB_ALL_HANDLES,
-                      gatts_read_multi_req, attrib, NULL);
+                        req_gatts, NULL, NULL);
     g_attrib_register(attrib, ATT_OP_READ_BY_GROUP_REQ, GATTRIB_ALL_HANDLES,
-                      gatts_read_by_group_req, attrib, NULL);
+                        req_gatts, NULL, NULL);
     g_attrib_register(attrib, ATT_OP_WRITE_REQ, GATTRIB_ALL_HANDLES,
-                      gatts_write_req, attrib, NULL);
+                        req_gatts, NULL, NULL);
     g_attrib_register(attrib, ATT_OP_WRITE_CMD, GATTRIB_ALL_HANDLES,
-                      gatts_write_cmd, attrib, NULL);
+                        req_gatts, NULL, NULL);
     g_attrib_register(attrib, ATT_OP_SIGNED_WRITE_CMD, GATTRIB_ALL_HANDLES,
-                      gatts_signed_write_cmd, attrib, NULL);
+                        req_gatts, NULL, NULL);
     g_attrib_register(attrib, ATT_OP_PREP_WRITE_REQ, GATTRIB_ALL_HANDLES,
-                      gatts_prep_write_req, attrib, NULL);
+                        req_gatts, NULL, NULL);
     g_attrib_register(attrib, ATT_OP_EXEC_WRITE_REQ, GATTRIB_ALL_HANDLES,
-                      gatts_exec_write_req, attrib, NULL);
+                        req_gatts, NULL, NULL);
 
     set_state(STATE_CONNECTED);
 }
@@ -580,9 +421,7 @@ static void primary_all_cb(uint8_t status, GSList *services, void *user_data)
     GSList *l;
 
     if (status) {
-        DBG("status returned error : %s (0x%02x)",
-            att_ecode2str(status), status);
-        resp_errstat(err_COMM_ERR, status);
+        resp_error_comm(status);
         return;
     }
 
@@ -602,9 +441,7 @@ static void primary_by_uuid_cb(uint8_t status, GSList *ranges, void *user_data)
     GSList *l;
 
     if (status) {
-        DBG("status returned error : %s (0x%02x)",
-            att_ecode2str(status), status);
-        resp_errstat(err_COMM_ERR, status);
+        resp_error_comm(status);
         return;
     }
 
@@ -622,9 +459,7 @@ static void included_cb(uint8_t status, GSList *includes, void *user_data)
     GSList *l;
 
     if (status) {
-        DBG("status returned error : %s (0x%02x)",
-            att_ecode2str(status), status);
-        resp_errstat(err_COMM_ERR, status);
+        resp_error_comm(status);
         return;
     }
 
@@ -644,9 +479,7 @@ static void char_cb(uint8_t status, GSList *characteristics, void *user_data)
     GSList *l;
 
     if (status) {
-        DBG("status returned error : %s (0x%02x)",
-            att_ecode2str(status), status);
-        resp_errstat(err_COMM_ERR, status);
+        resp_error_comm(status);
         return;
     }
 
@@ -666,9 +499,7 @@ static void char_desc_cb(uint8_t status, GSList *descriptors, void *user_data)
     GSList *l;
 
     if (status != 0) {
-        DBG("status returned error : %s (0x%02x)",
-            att_ecode2str(status), status);
-        resp_errstat(err_COMM_ERR, status);
+        resp_error_comm(status);
         return;
     }
 
@@ -676,9 +507,58 @@ static void char_desc_cb(uint8_t status, GSList *descriptors, void *user_data)
     for (l = descriptors; l != NULL; l = l->next) {
         struct gatt_desc *desc = (struct gatt_desc *)l->data;
         send_uint(tag_HANDLE, desc->handle);
-                send_str (tag_UUID, desc->uuid);
+        send_str (tag_UUID, desc->uuid);
     }
-        resp_end();
+    resp_end();
+}
+
+ssize_t dec_read_blob_resp(const uint8_t *pdu, size_t len, uint8_t *value,
+                            size_t vlen)
+{
+    if (pdu == NULL)
+        return -EINVAL;
+
+    if (pdu[0] != ATT_OP_READ_BLOB_RESP)
+        return -EINVAL;
+
+    if (value == NULL)
+        return len - 1;
+
+    if (vlen < (len - 1))
+        return -ENOBUFS;
+
+    memcpy(value, pdu + 1, len - 1);
+
+    return len - 1;
+}
+
+static void char_read_single_cb(guint8 status, const guint8 *pdu, guint16 plen,
+                            gpointer user_data)
+{
+    uint8_t value[plen];
+    ssize_t vlen;
+
+    if (status != 0) {
+        resp_error_comm(status);
+        return;
+    }
+
+    if ((pdu != NULL) && (plen >= 1)) {
+        if (pdu[0] == ATT_OP_READ_RESP)
+            vlen = dec_read_resp(pdu, plen, value, sizeof(value));
+        else
+            vlen = dec_read_blob_resp(pdu, plen, value, sizeof(value));
+    } else {
+        vlen = -EINVAL;
+    }
+    if (vlen < 0) {
+        resp_error(err_PROTO_ERR);
+        return;
+    }
+
+    resp_begin(rsp_READ);
+    send_data(value, vlen);
+    resp_end();
 }
 
 static void char_read_cb(guint8 status, const guint8 *pdu, guint16 plen,
@@ -688,17 +568,13 @@ static void char_read_cb(guint8 status, const guint8 *pdu, guint16 plen,
     ssize_t vlen;
 
     if (status != 0) {
-        DBG("status returned error : %s (0x%02x)",
-            att_ecode2str(status), status);
-        resp_errstat(err_COMM_ERR, status);
+        resp_error_comm(status);
         return;
     }
 
     vlen = dec_read_resp(pdu, plen, value, sizeof(value));
     if (vlen < 0) {
-        DBG("status returned error : %s (0x%02x)",
-            att_ecode2str(status), status);
-        resp_errstat(err_COMM_ERR,status);
+        resp_error(err_PROTO_ERR);
         return;
     }
 
@@ -722,9 +598,7 @@ static void char_read_by_uuid_cb(guint8 status, const guint8 *pdu,
     }
 
     if (status != 0) {
-        DBG("status returned error : %s (0x%02x)",
-            att_ecode2str(status), status);
-        resp_errstat(err_COMM_ERR, status);
+        resp_error_comm(status);
         goto done;
     }
 
@@ -740,7 +614,7 @@ static void char_read_by_uuid_cb(guint8 status, const guint8 *pdu,
         char_data->start = bt_get_le16(value) + 1;
 
         send_uint(tag_HANDLE, bt_get_le16(value));
-                send_data(value+2, list->len-2); // All the same length??
+        send_data(value+2, list->len-2); // All the same length??
     }
 
     att_data_list_free(list);
@@ -783,16 +657,10 @@ static void cmd_connect(int argcp, char **argvp)
             opt_dst_type = g_strdup(argvp[2]);
         else
             opt_dst_type = g_strdup("public");
-        g_free(opt_src);
-        if (argcp > 3) {
-            opt_src = g_strdup(argvp[3]);
-        } else {
-            opt_src = NULL;
-        }
     }
 
     if (opt_dst == NULL) {
-        resp_error(err_BAD_PARAM);
+        resp_error(err_BAD_PARAM);;
         return;
     }
 
@@ -805,14 +673,13 @@ static void cmd_connect(int argcp, char **argvp)
     {
         set_state(STATE_DISCONNECTED);
         g_error_free(gerr);
-        }
+    }
     else
         g_io_add_watch(iochannel, G_IO_HUP, channel_watcher, NULL);
 }
 
 static void cmd_disconnect(int argcp, char **argvp)
 {
-    DBG("");
     disconnect_io();
 }
 
@@ -831,7 +698,7 @@ static void cmd_primary(int argcp, char **argvp)
     }
 
     if (bt_string_to_uuid(&uuid, argvp[1]) < 0) {
-        resp_error(err_BAD_PARAM);
+        resp_error(err_BAD_PARAM);;
         return;
     }
 
@@ -873,7 +740,7 @@ static void cmd_included(int argcp, char **argvp)
     if (argcp > 2) {
         end = strtohandle(argvp[2]);
         if (end < 0) {
-            resp_error(err_BAD_PARAM);
+            resp_error(err_BAD_PARAM);;
             return;
         }
     }
@@ -894,7 +761,7 @@ static void cmd_char(int argcp, char **argvp)
     if (argcp > 1) {
         start = strtohandle(argvp[1]);
         if (start < 0) {
-            resp_error(err_BAD_PARAM);
+            resp_error(err_BAD_PARAM);;
             return;
         }
     }
@@ -902,7 +769,7 @@ static void cmd_char(int argcp, char **argvp)
     if (argcp > 2) {
         end = strtohandle(argvp[2]);
         if (end < 0) {
-            resp_error(err_BAD_PARAM);
+            resp_error(err_BAD_PARAM);;
             return;
         }
     }
@@ -911,7 +778,7 @@ static void cmd_char(int argcp, char **argvp)
         bt_uuid_t uuid;
 
         if (bt_string_to_uuid(&uuid, argvp[3]) < 0) {
-            resp_error(err_BAD_PARAM);
+            resp_error(err_BAD_PARAM);;
             return;
         }
 
@@ -932,7 +799,7 @@ static void cmd_char_desc(int argcp, char **argvp)
     if (argcp > 1) {
         start = strtohandle(argvp[1]);
         if (start < 0) {
-            resp_error(err_BAD_PARAM);
+            resp_error(err_BAD_PARAM);;
             return;
         }
     } else
@@ -941,13 +808,82 @@ static void cmd_char_desc(int argcp, char **argvp)
     if (argcp > 2) {
         end = strtohandle(argvp[2]);
         if (end < 0) {
-            resp_error(err_BAD_PARAM);
+            resp_error(err_BAD_PARAM);;
             return;
         }
     } else
         end = 0xffff;
 
     gatt_discover_desc(attrib, start, end, NULL, char_desc_cb, NULL);
+}
+
+struct read_data {
+    GAttrib *attrib;
+    GAttribResultFunc func;
+    gpointer user_data;
+    guint16 offset;
+    guint16 handle;
+    guint id;
+    int ref;
+};
+
+static void read_destroy(gpointer user_data)
+{
+    struct read_data *read = user_data;
+
+    if (__sync_sub_and_fetch(&read->ref, 1) > 0)
+        return;
+
+    g_attrib_unref(read->attrib);
+
+    g_free(read);
+}
+
+static void read_char_helper(guint8 status, const guint8 *rpdu,
+                    guint16 rlen, gpointer user_data)
+{
+    struct read_data *read = user_data;
+
+    read->func(status, rpdu, rlen, read->user_data);
+}
+
+guint gatt_read_char_single(GAttrib *attrib, uint16_t handle, uint16_t offset,
+                GAttribResultFunc func, gpointer user_data)
+{
+    uint8_t *buf;
+    size_t buflen;
+    guint16 plen;
+    guint id;
+    struct read_data *read;
+
+    read = g_try_new0(struct read_data, 1);
+
+    if (read == NULL)
+        return 0;
+
+    read->attrib = g_attrib_ref(attrib);
+    read->func = func;
+    read->user_data = user_data;
+    read->handle = handle;
+    read->offset = offset;
+
+    buf = g_attrib_get_buffer(attrib, &buflen);
+    if (!offset)
+        plen = enc_read_req(handle, buf, buflen);
+    else
+        plen = enc_read_blob_req(handle, offset, buf, buflen);
+
+    id = g_attrib_send(attrib, 0, buf, plen, read_char_helper,
+                       read, read_destroy);
+    if (id == 0) {
+        g_attrib_unref(read->attrib);
+        g_free(read);
+    } else {
+        __sync_fetch_and_add(&read->ref, 1);
+        read->id = id;
+    }
+
+    return id;
 }
 
 static void cmd_read_hnd(int argcp, char **argvp)
@@ -960,17 +896,30 @@ static void cmd_read_hnd(int argcp, char **argvp)
     }
 
     if (argcp < 2) {
-        resp_error(err_BAD_PARAM);
+        resp_error(err_BAD_PARAM);;
         return;
     }
 
     handle = strtohandle(argvp[1]);
     if (handle < 0) {
-        resp_error(err_BAD_PARAM);
+        resp_error(err_BAD_PARAM);;
         return;
     }
 
-    gatt_read_char(attrib, handle, char_read_cb, attrib);
+    if (argcp == 2) {
+        gatt_read_char(attrib, handle, char_read_cb, attrib);
+    } else {
+        char *end;
+        int offset = strtol(argvp[2], &end, 0);
+
+        if (*end != '\0') {
+            resp_error(err_BAD_PARAM);;
+            return;
+        }
+
+        gatt_read_char_single(attrib, handle, offset, char_read_single_cb,
+                            attrib);
+    }
 }
 
 static void cmd_read_uuid(int argcp, char **argvp)
@@ -987,14 +936,14 @@ static void cmd_read_uuid(int argcp, char **argvp)
 
     if (argcp < 2 ||
         bt_string_to_uuid(&uuid, argvp[1]) < 0) {
-        resp_error(err_BAD_PARAM);
+        resp_error(err_BAD_PARAM);;
         return;
     }
 
     if (argcp > 2) {
         start = strtohandle(argvp[2]);
         if (start < 0) {
-            resp_error(err_BAD_PARAM);
+            resp_error(err_BAD_PARAM);;
             return;
         }
     }
@@ -1002,7 +951,7 @@ static void cmd_read_uuid(int argcp, char **argvp)
     if (argcp > 3) {
         end = strtohandle(argvp[3]);
         if (end < 0) {
-            resp_error(err_BAD_PARAM);
+            resp_error(err_BAD_PARAM);;
             return;
         }
     }
@@ -1021,14 +970,12 @@ static void char_write_req_cb(guint8 status, const guint8 *pdu, guint16 plen,
                             gpointer user_data)
 {
     if (status != 0) {
-        DBG("status returned error : %s (0x%02x)",
-            att_ecode2str(status), status);
-        resp_errstat(err_COMM_ERR, status);
+        resp_error_comm(status);
         return;
     }
 
     if (!dec_write_resp(pdu, plen) && !dec_exec_write_resp(pdu, plen)) {
-        resp_errstat(err_PROTO_ERR, status);
+        resp_error(err_PROTO_ERR);
         return;
     }
 
@@ -1049,19 +996,19 @@ static void cmd_char_write_common(int argcp, char **argvp, int with_response)
     }
 
     if (argcp < 3) {
-        resp_error(err_BAD_PARAM);
+        resp_error(err_BAD_PARAM);;
         return;
     }
 
     handle = strtohandle(argvp[1]);
     if (handle <= 0) {
-        resp_error(err_BAD_PARAM);
+        resp_error(err_BAD_PARAM);;
         return;
     }
 
     plen = gatt_attr_data_from_string(argvp[2], &value);
     if (plen == 0) {
-        resp_error(err_BAD_PARAM);
+        resp_error(err_BAD_PARAM);;
         return;
     }
 
@@ -1080,12 +1027,12 @@ static void cmd_char_write_common(int argcp, char **argvp, int with_response)
 
 static void cmd_char_write(int argcp, char **argvp)
 {
-  cmd_char_write_common(argcp, argvp, 0);
+    cmd_char_write_common(argcp, argvp, 0);
 }
 
 static void cmd_char_write_rsp(int argcp, char **argvp)
 {
-  cmd_char_write_common(argcp, argvp, 1);
+    cmd_char_write_common(argcp, argvp, 1);
 }
 
 static void cmd_sec_level(int argcp, char **argvp)
@@ -1094,7 +1041,7 @@ static void cmd_sec_level(int argcp, char **argvp)
     BtIOSecLevel sec_level;
 
     if (argcp < 2) {
-        resp_error(err_BAD_PARAM);
+        resp_error(err_BAD_PARAM);;
         return;
     }
 
@@ -1105,7 +1052,7 @@ static void cmd_sec_level(int argcp, char **argvp)
     else if (strcasecmp(argvp[1], "low") == 0)
         sec_level = BT_IO_SEC_LOW;
     else {
-        resp_error(err_BAD_PARAM);
+        resp_error(err_BAD_PARAM);;
         return;
     }
 
@@ -1122,11 +1069,11 @@ static void cmd_sec_level(int argcp, char **argvp)
             BT_IO_OPT_INVALID);
     if (gerr) {
         printf("# Error: %s\n", gerr->message);
-        resp_error(err_COMM_ERR);
+        resp_error(err_PROTO_ERR);
         g_error_free(gerr);
     }
     else {
-        /* Tell bluepy the security level 
+        /* Tell bluepy the security level
          * has been changed successfuly */
         cmd_status(0, NULL);
     }
@@ -1138,14 +1085,12 @@ static void exchange_mtu_cb(guint8 status, const guint8 *pdu, guint16 plen,
     uint16_t mtu;
 
     if (status != 0) {
-        DBG("status returned error : %s (0x%02x)",
-            att_ecode2str(status), status);
-        resp_errstat(err_COMM_ERR, status);
+        resp_error_comm(status);
         return;
     }
 
     if (!dec_mtu_resp(pdu, plen, &mtu)) {
-        resp_errstat(err_PROTO_ERR, status);
+        resp_error(err_PROTO_ERR);
         return;
     }
 
@@ -1159,9 +1104,7 @@ static void exchange_mtu_cb(guint8 status, const guint8 *pdu, guint16 plen,
     else
     {
         printf("# Error exchanging MTU\n");
-        DBG("status returned error : %s (0x%02x)",
-            att_ecode2str(status), status);
-        resp_errstat(err_COMM_ERR, status);
+        resp_error(err_PROTO_ERR);
     }
 }
 
@@ -1175,7 +1118,7 @@ static void cmd_mtu(int argcp, char **argvp)
     assert(!opt_psm);
 
     if (argcp < 2) {
-        resp_error(err_BAD_PARAM);
+        resp_error(err_BAD_PARAM);;
         return;
     }
 
@@ -1188,7 +1131,7 @@ static void cmd_mtu(int argcp, char **argvp)
     errno = 0;
     opt_mtu = strtoll(argvp[1], NULL, 16);
     if (errno != 0 || opt_mtu < ATT_DEFAULT_LE_MTU) {
-        resp_error(err_BAD_PARAM);
+        resp_error(err_BAD_PARAM);;
         return;
     }
 
@@ -1196,56 +1139,122 @@ static void cmd_mtu(int argcp, char **argvp)
 }
 
 static void set_mode_complete(uint8_t status, uint16_t length,
-                    const void *param, void *user_data)
+                                const void *param, void *user_data)
 {
     if (status != MGMT_STATUS_SUCCESS) {
         DBG("status returned error : %s (0x%02x)",
             mgmt_errstr(status), status);
-        resp_mgmtstat(err_PROTO_ERR, status);
+        resp_mgmt(err_PROTO_ERR);
         return;
     }
 
     resp_mgmt(err_SUCCESS);
 }
 
-static bool set_mode(uint16_t opcode, char *p_mode)
+static bool on_or_off(char *p_mode, uint8_t *p_val)
+{
+    if (!memcmp(p_mode, "on", 2))
+        *p_val = 1;
+    else if (!memcmp(p_mode, "off", 3))
+        *p_val = 0;
+    else
+        return false;
+    return true;
+}
+
+static bool set_mode_with_cb(uint16_t opcode, char *p_mode, mgmt_request_func_t callback)
 {
     struct mgmt_mode cp;
-    uint8_t val;
+    uintptr_t user_data;
+
+    memset(&cp, 0, sizeof(cp));
+
+    if (!on_or_off(p_mode, &cp.val))
+        return false;
+
+    /* Save the configured value in the user_data */
+    if (cp.val) user_data = 1;
+    else user_data = 0;
 
     if (!mgmt_master) {
         resp_error(err_NO_MGMT);
         return true;
     }
 
-    if (!memcmp(p_mode, "on", 2))
-        val = 1;
-    else if (!memcmp(p_mode, "off", 3))
-        val = 0;
-    else
-        return false;
-
-    memset(&cp, 0, sizeof(cp));
-    cp.val = val;
-
-    // at this time only index 0 is supported
     if (mgmt_send(mgmt_master, opcode,
-            mgmt_ind, sizeof(cp), &cp,
-            set_mode_complete, NULL, NULL) == 0) {
+            opt_src_idx, sizeof(cp), &cp,
+            callback, (void *)user_data, NULL) == 0) {
         resp_mgmt(err_SUCCESS);
     }
     return true;
 }
 
+static bool set_mode(uint16_t opcode, char *p_mode)
+{
+    return set_mode_with_cb(opcode, p_mode, set_mode_complete);
+}
 
-static void cmd_le(int argcp, char **argvp)
+static void cmd_powered(int argcp, char **argvp)
 {
     if (argcp < 2) {
         resp_mgmt(err_BAD_PARAM);
         return;
     }
 
-    if (!set_mode(MGMT_OP_SET_LE, argvp[1])) {
+    if (!set_mode(MGMT_OP_SET_POWERED, argvp[1])) {
+        resp_mgmt(err_BAD_PARAM);
+    }
+}
+
+static void cmd_discoverable(int argcp, char **argvp)
+{
+    struct mgmt_cp_set_discoverable cp = {0, 0};
+    uint16_t opcode = MGMT_OP_SET_DISCOVERABLE;
+
+    if (argcp < 2) {
+        resp_mgmt(err_BAD_PARAM);
+        return;
+    }
+
+    if (!on_or_off(argvp[1], &cp.val)) {
+        resp_mgmt(err_BAD_PARAM);
+        return;
+    }
+
+    if (!mgmt_master) {
+        resp_error(err_NO_MGMT);
+        return;
+    }
+
+    if (mgmt_send(mgmt_master, opcode, opt_src_idx, sizeof(cp),
+        &cp, set_mode_complete, NULL, NULL) == 0)
+    {
+        DBG("mgmt_send(MGMT_OP_SET_DISCOVERABLE) failed");
+        resp_mgmt(err_PROTO_ERR);
+        return;
+    }
+}
+
+static void cmd_connectable(int argcp, char **argvp)
+{
+    if (argcp < 2) {
+        resp_mgmt(err_BAD_PARAM);
+        return;
+    }
+
+    if (!set_mode(MGMT_OP_SET_CONNECTABLE, argvp[1])) {
+        resp_mgmt(err_BAD_PARAM);
+    }
+}
+
+static void cmd_fast_connectable(int argcp, char **argvp)
+{
+    if (argcp < 2) {
+        resp_mgmt(err_BAD_PARAM);
+        return;
+    }
+
+    if (!set_mode(MGMT_OP_SET_FAST_CONNECTABLE, argvp[1])) {
         resp_mgmt(err_BAD_PARAM);
     }
 }
@@ -1262,13 +1271,103 @@ static void cmd_pairable(int argcp, char **argvp)
     }
 }
 
-static void pair_device_complete(uint8_t status, uint16_t length,
-                    const void *param, void *user_data)
+static void cmd_link_security(int argcp, char **argvp)
+{
+    if (argcp < 2) {
+        resp_mgmt(err_BAD_PARAM);
+        return;
+    }
+
+    if (!set_mode(MGMT_OP_SET_LINK_SECURITY, argvp[1])) {
+        resp_mgmt(err_BAD_PARAM);
+    }
+}
+
+static void cmd_ssp(int argcp, char **argvp)
+{
+    if (argcp < 2) {
+        resp_mgmt(err_BAD_PARAM);
+        return;
+    }
+
+    if (!set_mode(MGMT_OP_SET_SSP, argvp[1])) {
+        resp_mgmt(err_BAD_PARAM);
+    }
+}
+
+static void cmd_hs(int argcp, char **argvp)
+{
+    if (argcp < 2) {
+        resp_mgmt(err_BAD_PARAM);
+        return;
+    }
+
+    if (!set_mode(MGMT_OP_SET_HS, argvp[1])) {
+        resp_mgmt(err_BAD_PARAM);
+    }
+}
+
+static void cmd_le(int argcp, char **argvp)
+{
+    if (argcp < 2) {
+        resp_mgmt(err_BAD_PARAM);
+        return;
+    }
+
+    if (!set_mode(MGMT_OP_SET_LE, argvp[1])) {
+        resp_mgmt(err_BAD_PARAM);
+    }
+}
+
+static void set_advertising_complete(uint8_t status, uint16_t length,
+                                const void *param, void *user_data)
 {
     if (status != MGMT_STATUS_SUCCESS) {
         DBG("status returned error : %s (0x%02x)",
-                mgmt_errstr(status), status);
-        resp_mgmtstat(err_PROTO_ERR, status);
+            mgmt_errstr(status), status);
+        resp_mgmt(err_PROTO_ERR);
+        return;
+    }
+
+    resp_mgmt(err_SUCCESS);
+
+    if (user_data)
+        set_state(STATE_ADVERTISING);
+    else
+        set_state(STATE_DISCONNECTED);
+}
+
+static void cmd_advertising(int argcp, char **argvp)
+{
+    if (argcp < 2) {
+        resp_mgmt(err_BAD_PARAM);
+        return;
+    }
+
+    if (!set_mode_with_cb(MGMT_OP_SET_ADVERTISING, argvp[1], set_advertising_complete)) {
+        resp_mgmt(err_BAD_PARAM);
+    }
+}
+
+static void cmd_bredr(int argcp, char **argvp)
+{
+    if (argcp < 2) {
+        resp_mgmt(err_BAD_PARAM);
+        return;
+    }
+
+    if (!set_mode(MGMT_OP_SET_BREDR, argvp[1])) {
+        resp_mgmt(err_BAD_PARAM);
+    }
+}
+
+static void pair_device_complete(uint8_t status, uint16_t length,
+                                    const void *param, void *user_data)
+{
+    if (status != MGMT_STATUS_SUCCESS) {
+        DBG("status returned error : %s (0x%02x)",
+            mgmt_errstr(status), status);
+        resp_mgmt(err_PROTO_ERR);
         return;
     }
 
@@ -1281,11 +1380,6 @@ static void cmd_pair(int argcp, char **argvp)
     bdaddr_t bdaddr;
     uint8_t io_cap = IO_CAPABILITY_NOINPUTNOOUTPUT;
     uint8_t addr_type = BDADDR_LE_RANDOM;
-
-    if (!mgmt_master) {
-        resp_error(err_NO_MGMT);
-        return;
-    }
 
     if (conn_state != STATE_CONNECTED) {
         resp_mgmt(err_BAD_STATE);
@@ -1306,23 +1400,28 @@ static void cmd_pair(int argcp, char **argvp)
     cp.addr.type = addr_type;
     cp.io_cap = io_cap;
 
+    if (!mgmt_master) {
+        resp_error(err_NO_MGMT);
+        return;
+    }
+
     if (mgmt_send(mgmt_master, MGMT_OP_PAIR_DEVICE,
-            mgmt_ind, sizeof(cp), &cp,
+                opt_src_idx, sizeof(cp), &cp,
                 pair_device_complete, NULL,
                 NULL) == 0) {
-        DBG("mgmt_send(MGMT_OP_PAIR_DEVICE) failed for %s for hci%u", opt_dst, mgmt_ind);
+        DBG("mgmt_send(MGMT_OP_PAIR_DEVICE) failed for %s for hci%u", opt_dst, MGMT_INDEX_NONE);
         resp_mgmt(err_PROTO_ERR);
         return;
     }
 }
 
 static void unpair_device_complete(uint8_t status, uint16_t length,
-                    const void *param, void *user_data)
+                                    const void *param, void *user_data)
 {
     if (status != MGMT_STATUS_SUCCESS) {
         DBG("status returned error : %s (0x%02x)",
-                mgmt_errstr(status), status);
-        resp_mgmtstat(err_PROTO_ERR, status);
+            mgmt_errstr(status), status);
+        resp_mgmt(err_PROTO_ERR);
         return;
     }
 
@@ -1335,19 +1434,19 @@ static void cmd_unpair(int argcp, char **argvp)
     bdaddr_t bdaddr;
     uint8_t addr_type = BDADDR_LE_RANDOM;
 
-    if (!mgmt_master) {
-        resp_error(err_NO_MGMT);
+    if (argcp != 3) {
+        resp_mgmt(err_BAD_PARAM);
         return;
     }
 
-    if (str2ba(opt_dst, &bdaddr)) {
+    if (str2ba(argvp[1], &bdaddr)) {
         DBG("str2ba failed");
         resp_mgmt(err_NOT_FOUND);
         return;
     }
 
-    if (!memcmp(opt_dst_type, "public", 6)) {
-        addr_type = BDADDR_LE_PUBLIC;
+    if (!memcmp(argvp[2], "public", 6)) {
+            addr_type = BDADDR_LE_PUBLIC;
     }
 
     memset(&cp, 0, sizeof(cp));
@@ -1355,11 +1454,16 @@ static void cmd_unpair(int argcp, char **argvp)
     cp.addr.type = addr_type;
     cp.disconnect = 1;
 
+    if (!mgmt_master) {
+        resp_error(err_NO_MGMT);
+        return;
+    }
+
     if (mgmt_send(mgmt_master, MGMT_OP_UNPAIR_DEVICE,
-            mgmt_ind, sizeof(cp), &cp,
-            unpair_device_complete, NULL,
+                opt_src_idx, sizeof(cp), &cp,
+                unpair_device_complete, NULL,
                 NULL) == 0) {
-        DBG("mgmt_send(MGMT_OP_UNPAIR_DEVICE) failed for %s for hci%u", opt_dst, mgmt_ind);
+        DBG("mgmt_send(MGMT_OP_UNPAIR_DEVICE) failed for %s for hci%u", opt_dst, MGMT_INDEX_NONE);
         resp_mgmt(err_PROTO_ERR);
         return;
     }
@@ -1369,7 +1473,7 @@ static void scan_cb(uint8_t status, uint16_t length, const void *param, void *us
 {
     if (status != MGMT_STATUS_SUCCESS) {
         DBG("Scan error: %s (0x%02x)", mgmt_errstr(status), status);
-        resp_mgmtstat(status == MGMT_STATUS_BUSY? err_BUSY : err_PROTO_ERR, status);
+        resp_mgmt(status == MGMT_STATUS_BUSY? err_BUSY : err_PROTO_ERR);
         return;
     }
 
@@ -1383,14 +1487,14 @@ static void scan(bool start)
     struct mgmt_cp_start_discovery cp = { (1 << BDADDR_LE_PUBLIC) | (1 << BDADDR_LE_RANDOM) };
     uint16_t opcode = start? MGMT_OP_START_DISCOVERY : MGMT_OP_STOP_DISCOVERY;
 
+    DBG("Scan %s", start? "start" : "stop");
+
     if (!mgmt_master) {
         resp_error(err_NO_MGMT);
         return;
     }
 
-    DBG("Scan %s", start? "start" : "stop");
-
-    if (mgmt_send(mgmt_master, opcode, mgmt_ind, sizeof(cp),
+    if (mgmt_send(mgmt_master, opcode, opt_src_idx, sizeof(cp),
         &cp, scan_cb, NULL, NULL) == 0)
     {
         DBG("mgmt_send(MGMT_OP_%s_DISCOVERY) failed", start? "START" : "STOP");
@@ -1417,223 +1521,133 @@ static void cmd_scan(int argcp, char **argvp)
     }
 }
 
-#include "hci.h"
-#include "hci_lib.h"
-
-static gboolean hci_monitor_cb(GIOChannel *chan, GIOCondition cond, gpointer user_data)
+static void show_device_info(void)
 {
-    unsigned char buf[HCI_MAX_FRAME_SIZE], *ptr;
-    int type;
-    gsize len;
-    GError *err= NULL;
-    int r;
+#define TEST_SETTING(__f, __s) do {\
+    if (dev_info.__f & MGMT_SETTING_ ## __s) { \
+        DBG("  " # __s); \
+    } } while (0)
 
-    if ((r= g_io_channel_read_chars(chan, (gchar *) buf, 1, &len, &err)) != G_IO_STATUS_NORMAL) {
-        if (err) DBG("reading pkt type reports state %d: %s", r, err->message);
-        //andy: stop passive scan
-        return TRUE;
-    }
-    type= *buf;
-    switch (type) {
-        case HCI_COMMAND_PKT: {
-            hci_command_hdr *ch;
-            if ((r= g_io_channel_read_chars(chan, (gchar *) buf, HCI_COMMAND_HDR_SIZE, &len, &err)) != G_IO_STATUS_NORMAL) {
-                if (err) DBG("g_io_channel_read_chars() reports state %d: %s", r, err->message);
-                return TRUE;
-            }
-            ch = (hci_command_hdr *) buf;
-            ptr = buf + HCI_COMMAND_HDR_SIZE;
-            if ((r= g_io_channel_read_chars(chan, (gchar *) ptr, ch->plen, &len, &err)) != G_IO_STATUS_NORMAL) {
-                if (err) DBG("g_io_channel_read_chars() reports state %d: %s", r, err->message);
-                return TRUE;
-            }
-            switch(ch->opcode) {
-                case 0x2000|OCF_LE_SET_SCAN_ENABLE: {
-                    le_set_scan_enable_cp *lescan = (le_set_scan_enable_cp *) ptr;
-                    if (lescan->enable) {
-                        DBG("Start of passive scan.");
-                    } else {
-                        if (conn_state == STATE_SCANNING) {
-                            resp_mgmt(err_SUCCESS);
-                            set_state(STATE_DISCONNECTED);
-                        }
-                        DBG("End of passive scan - removing watch.");
-                        return FALSE; // remove watch
-                    }
-                }
-                break;
+    DBG("Supported settings:");
+    TEST_SETTING(supported_settings, POWERED);
+    TEST_SETTING(supported_settings, CONNECTABLE);
+    TEST_SETTING(supported_settings, FAST_CONNECTABLE);
+    TEST_SETTING(supported_settings, DISCOVERABLE);
+    TEST_SETTING(supported_settings, BONDABLE);
+    TEST_SETTING(supported_settings, LINK_SECURITY);
+    TEST_SETTING(supported_settings, SSP);
+    TEST_SETTING(supported_settings, BREDR);
+    TEST_SETTING(supported_settings, HS);
+    TEST_SETTING(supported_settings, LE);
+    TEST_SETTING(supported_settings, ADVERTISING);
+    TEST_SETTING(supported_settings, SECURE_CONN);
+    TEST_SETTING(supported_settings, DEBUG_KEYS);
+    TEST_SETTING(supported_settings, PRIVACY);
+    TEST_SETTING(supported_settings, CONFIGURATION);
+    TEST_SETTING(supported_settings, STATIC_ADDRESS);
 
-                default:
-                    DBG("Ignoring HCI COMMAND 0x%04x", ch->opcode);
-            } // switch(ch->opcode)
-        } break;
-
-        case HCI_EVENT_PKT: {
-            hci_event_hdr *eh;
-            if ((r= g_io_channel_read_chars(chan, (gchar *) buf, HCI_EVENT_HDR_SIZE, &len, &err)) != G_IO_STATUS_NORMAL) {
-                if (err) DBG("g_io_channel_read_chars() reports state %d: %s", r, err->message);
-                return TRUE;
-            }
-            eh = (hci_event_hdr *) buf;
-            ptr = buf + HCI_EVENT_HDR_SIZE;
-            if ((r= g_io_channel_read_chars(chan, (gchar *) ptr, eh->plen, &len, &err)) != G_IO_STATUS_NORMAL) {
-                if (err) DBG("g_io_channel_read_chars() reports state %d: %s", r, err->message);
-                return TRUE;
-            }
-            switch(eh->evt) {
-                case EVT_CMD_COMPLETE: {
-                    // evt_cmd_complete *cmpl = (void *) ptr;
-                    // DBG("command complete (0x%02x|0x%04x) 0x%02x 0x%02x", cmpl->ncmd, cmpl->opcode, *(uint8_t *)(ptr+3), *(uint8_t *)(ptr+4));
-                }
-                break;
-
-                case EVT_LE_META_EVENT: {
-                    evt_le_meta_event *meta = (void *) ptr;
-
-                    switch(meta->subevent) {
-                        case EVT_LE_ADVERTISING_REPORT: {
-                            le_advertising_info *ev = (le_advertising_info *) (meta->data + 1);
-                            // const uint8_t *val= ev->bdaddr.b;
-                            const uint8_t rssi= ev->data[ev->length];
-                            struct mgmt_addr_info addr;
-                            addr.type= ev->bdaddr_type;
-                            addr.bdaddr= ev->bdaddr;
-                            // DBG("Device found: %02X:%02X:%02X:%02X:%02X:%02X type=%X length=%d data[0]=0x%02x rssi=0x%02x", 
-                            //     val[5], val[4], val[3], val[2], val[1], val[0], 
-                            //     ev->bdaddr_type, ev->length, ev->data[0], ev->data[ev->length]);
-                            if (0) {
-                                int i=0;
-                                for (i=0; i<ev->length; i++)
-                                    DBG("buf: %02x", ev->data[i]);
-                            }
-
-                            if (conn_state == STATE_SCANNING) {
-                                resp_begin(rsp_SCAN);
-                                send_addr(&addr);
-                                send_uint(tag_RSSI, 256-rssi);
-                                send_uint(tag_FLAG, 0);   //andy: where do we get these from?
-                                if (ev->length)
-                                    send_data(ev->data, ev->length);
-                                resp_end();
-                            }
-                        }
-                        break;
-
-                        default:
-                            DBG("Ignoring EVT_LE_ADVERTISING_REPORT subevent %02x", meta->subevent);
-                            return TRUE;
-                    } // switch (meta->subevent)
-
-                } // case EVT_LE_META_EVENT
-                break;
-                default:
-                    DBG("Ignoring event %02x", eh->evt);
-                    return TRUE;
-            } // switch(eh->evt)
-
-        } // case HCI_EVENT_PKT
-        break;
-
-        default:
-            DBG("Ignoring packet type %02x", type);
-            return TRUE;
-    }// switch (type)
-    return TRUE;
+    DBG("Current settings:");
+    TEST_SETTING(current_settings, POWERED);
+    TEST_SETTING(current_settings, CONNECTABLE);
+    TEST_SETTING(current_settings, FAST_CONNECTABLE);
+    TEST_SETTING(current_settings, DISCOVERABLE);
+    TEST_SETTING(current_settings, BONDABLE);
+    TEST_SETTING(current_settings, LINK_SECURITY);
+    TEST_SETTING(current_settings, SSP);
+    TEST_SETTING(current_settings, BREDR);
+    TEST_SETTING(current_settings, HS);
+    TEST_SETTING(current_settings, LE);
+    TEST_SETTING(current_settings, ADVERTISING);
+    TEST_SETTING(current_settings, SECURE_CONN);
+    TEST_SETTING(current_settings, DEBUG_KEYS);
+    TEST_SETTING(current_settings, PRIVACY);
+    TEST_SETTING(current_settings, CONFIGURATION);
+    TEST_SETTING(current_settings, STATIC_ADDRESS);
 }
 
-
-// perform a passive scan, i.e. report ADV_IND packets but do not request SCN_RSP packets
-static void discover(bool start)
+static void read_info_complete(uint8_t status, uint16_t length,
+        const void *param, void *user_data)
 {
-    int err;
-    uint8_t own_type = LE_PUBLIC_ADDRESS;
-    uint8_t scan_type = 0x00;  // passive
-    uint8_t filter_policy = 0x00;
-    uint16_t interval = htobs(0x0010);
-    uint16_t window = htobs(0x0010);
-    uint8_t filter_dup = 0x00;  // do not filter duplicates
+    const struct mgmt_rp_read_info *rp = param;
 
-    struct hci_filter nf, of;
-    //struct sigaction sa;
-    socklen_t olen;
-
-    hci_dd = hci_open_dev(mgmt_ind);
-    DBG("hcidev handle is 0x%x, mgmt_ind is %d", hci_dd, mgmt_ind);
-    if (start) {
-        err = hci_le_set_scan_enable(hci_dd, 0x00, filter_dup, 10000);
-        err = hci_le_set_scan_parameters(hci_dd, scan_type, interval, window,
-                                             own_type, filter_policy, 10000);
-        if (err < 0) {
-            DBG("Set scan parameters failed");
-            return;
-        }
-        hci_io = g_io_channel_unix_new(hci_dd);
-        g_io_channel_set_encoding(hci_io, NULL, NULL);
-        g_io_channel_set_close_on_unref(hci_io, TRUE);
-        g_io_add_watch(hci_io, G_IO_IN | G_IO_ERR | G_IO_HUP | G_IO_NVAL, hci_monitor_cb, NULL);
-        g_io_channel_unref(hci_io);
-
-        // setup filter
-        olen = sizeof(of);
-        if (getsockopt(hci_dd, SOL_HCI, HCI_FILTER, &of, &olen) < 0) {
-            printf("Could not get socket options\n");
-            return;
-        }
-        hci_filter_clear(&nf);
-        hci_filter_set_ptype(HCI_EVENT_PKT, &nf);
-        hci_filter_set_event(EVT_LE_META_EVENT, &nf);
-        hci_filter_set_event(EVT_CMD_COMPLETE, &nf);
-        hci_filter_set_ptype(HCI_COMMAND_PKT, &nf);
-        hci_filter_set_event(OCF_LE_SET_SCAN_ENABLE, &nf);
-
-        if (setsockopt(hci_dd, SOL_HCI, HCI_FILTER, &nf, sizeof(nf)) < 0) {
-            printf("Could not set socket options\n");
-            return;
-        }
-
-        DBG("LE Scan ...");
-        err = hci_le_set_scan_enable(hci_dd, 0x01, filter_dup, 10000);
-        if (err < 0) {
-            //andy: signal error
-            DBG("Enable scan failed");
-            return;
-        }
-
-        resp_mgmt(err_SUCCESS);
-        set_state(STATE_SCANNING);
-    } else {
-        // set filter to receive no events
-        DBG(" stop pasv scan -----------------------------------");
-        setsockopt(hci_dd, SOL_HCI, HCI_FILTER, &of, sizeof(of));
-
-        err = hci_le_set_scan_enable(hci_dd, 0x00, filter_dup, 10000);
-        if (err < 0) {
-            DBG("Disable scan failed");
-            exit(1);
-        }
-        hci_close_dev(hci_dd);
-        hci_dd= -1;
-        hci_io= NULL;
-        resp_mgmt(err_SUCCESS);
-        set_state(STATE_DISCONNECTED);
+    if (status != MGMT_STATUS_SUCCESS) {
+        DBG("Failed to read device information: %s (0x%02x)",
+            mgmt_errstr(status), status);
+        resp_mgmt(err_PROTO_ERR);
+        return;
     }
+
+    if (length < sizeof(*rp)) {
+        DBG("Wrong size of read info response");
+        resp_mgmt(err_PROTO_ERR);
+        return;
+    }
+
+    /* Save a copy of the device info response */
+    dev_info = *rp;
+
+    show_device_info();
+
+    resp_mgmt_with_data(dev_info.current_settings);
 }
 
-static void cmd_pasvend(int argcp, char **argvp)
+static void cmd_settings(int argcp, char **argvp)
 {
     if (1 < argcp) {
         resp_mgmt(err_BAD_PARAM);
-    } else {
-        discover(FALSE);
+    }
+
+    if (!mgmt_master) {
+        resp_error(err_NO_MGMT);
+        return;
+    }
+
+    if (mgmt_send(mgmt_master, MGMT_OP_READ_INFO,
+            opt_src_idx, 0, NULL,
+            read_info_complete, NULL, NULL) == 0) {
+        DBG("mgmt_send(MGMT_OP_READ_INFO) failed");
+        resp_mgmt(err_PROTO_ERR);
     }
 }
 
-static void cmd_pasv(int argcp, char **argvp)
+void on_indicate_complete(guint8 status, const guint8 *pdu,
+                          guint16 len, gpointer user_data)
 {
-    if (1 < argcp) {
-        resp_mgmt(err_BAD_PARAM);
+
+}
+
+static void cmd_gatts(int argcp, char **argvp)
+{
+    if (argcp == 2) {
+        GAttribResultFunc cb_func = NULL;
+        uint8_t *opdu = NULL;
+        size_t olen = gatt_attr_data_from_string(argvp[1], &opdu);
+
+        DBG("GATTS %p %d %zd", opdu, opt_mtu, olen);
+
+        /* Check if it is a value gatt server request */
+        if (opdu && (opt_mtu == 0 || olen <= opt_mtu) &&
+            !(opdu[0] == BT_ATT_OP_MTU_REQ ||
+              opdu[0] == BT_ATT_OP_FIND_INFO_REQ ||
+              opdu[0] == BT_ATT_OP_FIND_BY_TYPE_REQ ||
+              opdu[0] == BT_ATT_OP_READ_BY_TYPE_REQ ||
+              opdu[0] == BT_ATT_OP_READ_REQ ||
+              opdu[0] == BT_ATT_OP_READ_BLOB_REQ ||
+              opdu[0] == BT_ATT_OP_READ_MULT_REQ ||
+              opdu[0] == BT_ATT_OP_READ_BY_GRP_TYPE_REQ ||
+              opdu[0] == BT_ATT_OP_WRITE_REQ ||
+              opdu[0] == BT_ATT_OP_PREP_WRITE_REQ ||
+              opdu[0] == BT_ATT_OP_EXEC_WRITE_REQ)) {
+            if (opdu[0] == BT_ATT_OP_HANDLE_VAL_IND) {
+                cb_func = on_indicate_complete;
+            }
+            g_attrib_send(attrib, 0, opdu, olen, cb_func, NULL, NULL);
+        } else {
+            resp_error(err_BAD_PARAM);;
+        }
+        g_free(opdu);
     } else {
-        discover(TRUE);
+        resp_error(err_BAD_PARAM);;
     }
 }
 
@@ -1647,9 +1661,11 @@ static struct {
         "Show this help"},
     { "stat",       cmd_status, "",
         "Show current status" },
+    { "info",       cmd_info, "",
+        "Show device info" },
     { "quit",       cmd_exit,   "",
         "Exit interactive mode" },
-    { "conn",       cmd_connect,    "[address [address type [interface]]]",
+    { "conn",       cmd_connect,    "[address [address type]]",
         "Connect to a remote device" },
     { "disc",       cmd_disconnect, "",
         "Disconnect from a remote device" },
@@ -1661,8 +1677,8 @@ static struct {
         "Characteristics Discovery" },
     { "desc",       cmd_char_desc,  "[start hnd] [end hnd]",
         "Characteristics Descriptor Discovery" },
-    { "rd",         cmd_read_hnd,   "<handle>",
-        "Characteristics Value/Descriptor Read by handle" },
+    { "rd",         cmd_read_hnd,   "<handle> [offset]",
+        "Characteristics Value/Descriptor Read by handle. offset: app handled read" },
     { "rdu",        cmd_read_uuid,  "<UUID> [start hnd] [end hnd]",
         "Characteristics Value/Descriptor Read by UUID" },
     { "wrr",        cmd_char_write_rsp, "<handle> <new value>",
@@ -1673,22 +1689,40 @@ static struct {
         "Set security level. Default: low" },
     { "mtu",        cmd_mtu,    "<value>",
         "Exchange MTU for GATT/ATT" },
-    { "le",      cmd_le,  "[on | off]",
+    { "powered",        cmd_powered,    "[on | off]",
+        "Control powered feature on the controller" },
+    { "discoverable",       cmd_discoverable,   "[on | off]",
+        "Control discoverable feature on the controller" },
+    { "connectable",        cmd_connectable,    "[on | off]",
+        "Control connectable feature on the controller" },
+    { "fast_connectable",       cmd_fast_connectable,   "[on | off]",
+        "Control fast connectable feature on the controller" },
+    { "pairable",       cmd_pairable,   "[on | off]",
+        "Control pairable feature on the controller" },
+    { "link_security",      cmd_link_security,  "[on | off]",
+        "Control link_security feature on the controller" },
+    { "ssp",        cmd_ssp,    "[on | off]",
+        "Control ssp feature on the controller" },
+    { "hs",     cmd_hs, "[on | off]",
+        "Control hs feature on the controller" },
+    { "le",         cmd_le,     "[on | off]",
         "Control LE feature on the controller" },
-    { "pairable",   cmd_pairable,  "[on | off]",
-        "Control PAIRABLE feature on the controller" },
-    { "pair",      cmd_pair,  "",
+    { "bredr",      cmd_bredr,  "[on | off]",
+        "Control BR/EDR feature on the controller" },
+    { "pair",       cmd_pair,   "",
         "Start pairing with the device" },
-    { "unpair",  cmd_unpair,  "",
+    { "unpair",     cmd_unpair, "<address> <address type>",
         "Start unpairing with the device" },
+    { "settings",       cmd_settings,   "",
+        "Get the current settings" },
     { "scan",       cmd_scan,   "",
         "Start scan" },
     { "scanend",    cmd_scanend,    "",
         "Force scan end" },
-    { "pasv",       cmd_pasv,  "",
-        "Start passive scan" },
-    { "pasvend",    cmd_pasvend,  "",
-        "Force passive scan end" },
+    { "advertising",    cmd_advertising,    "[on | off]",
+        "Start/stop advertising" },
+    { "gatts",  cmd_gatts,  "<data>",
+        "GATT server response" },
     { NULL, NULL, NULL}
 };
 
@@ -1742,7 +1776,7 @@ static gboolean prompt_read(GIOChannel *chan, GIOCondition cond,
     }
 
     if ( G_IO_STATUS_NORMAL != g_io_channel_read_line(chan, &myline, NULL, NULL, NULL)
-            || myline == NULL
+        || myline == NULL
     )
     {
         DBG("Quitting on input read fail");
@@ -1754,15 +1788,14 @@ static gboolean prompt_read(GIOChannel *chan, GIOCondition cond,
     return TRUE;
 }
 
-
 static void read_version_complete(uint8_t status, uint16_t length,
-                    const void *param, void *user_data)
+                                const void *param, void *user_data)
 {
     const struct mgmt_rp_read_version *rp = param;
 
     if (status != MGMT_STATUS_SUCCESS) {
         DBG("Failed to read version information: %s (0x%02x)",
-                mgmt_errstr(status), status);
+            mgmt_errstr(status), status);
         return;
     }
 
@@ -1772,13 +1805,41 @@ static void read_version_complete(uint8_t status, uint16_t length,
     }
 
     DBG("Bluetooth management interface %u.%u initialized",
-            rp->version, btohs(rp->revision));
+        rp->version, btohs(rp->revision));
 }
 
 static void mgmt_device_connected(uint16_t index, uint16_t length,
-        const void *param, void *user_data)
+                                const void *param, void *user_data)
 {
-    DBG("New device connected");
+    gchar s[18] = {0};
+    const struct mgmt_ev_device_connected *ev = param;
+    assert(index == opt_src_idx);
+
+    if (ba2str(&ev->addr.bdaddr, s) != 17)
+        memset(s, 0xFF, sizeof(s) - 1);
+
+    DBG("New device connected : type %d %s state = %d", ev->addr.type, s, conn_state);
+
+    if (conn_state != STATE_ADVERTISING)
+        return;
+
+    /* When advertising, indicate that advertising stopped */
+    set_state(STATE_DISCONNECTED);
+
+    /* Send the information about the connection request */
+    resp_begin(rsp_MGMT);
+    send_addr(&ev->addr);
+    resp_end();
+}
+
+static void mgmt_device_disconnected(uint16_t index, uint16_t length,
+                                const void *param, void *user_data)
+{
+    // TODO: forward reason code to python
+    const struct mgmt_ev_device_disconnected *ev = param;
+    assert(index == opt_src_idx);
+    (void)ev;
+    DBG("Device disconnected, reason 0x%x", ev->reason);
 }
 
 static void mgmt_scanning(uint16_t index, uint16_t length,
@@ -1786,6 +1847,7 @@ static void mgmt_scanning(uint16_t index, uint16_t length,
 {
     const struct mgmt_ev_discovering *ev = param;
     assert(length == sizeof(*ev));
+    assert(index == opt_src_idx);
 
     DBG("Scanning (0x%x): %s", ev->type, ev->discovering? "started" : "ended");
 
@@ -1796,14 +1858,12 @@ static void mgmt_device_found(uint16_t index, uint16_t length,
                             const void *param, void *user_data)
 {
     const struct mgmt_ev_device_found *ev = param;
-    // const uint8_t *val = ev->addr.bdaddr.b;
     assert(length == sizeof(*ev) + ev->eir_len);
-    // DBG("Device found: %02X:%02X:%02X:%02X:%02X:%02X type=%X flags=%X", val[5], val[4], val[3], val[2], val[1], val[0], ev->addr.type, ev->flags);
+    assert(index == opt_src_idx);
 
     // Result sometimes sent too early
     if (conn_state != STATE_SCANNING)
         return;
-    //confirm_name(&ev->addr, 1);
 
     resp_begin(rsp_SCAN);
     send_addr(&ev->addr);
@@ -1816,63 +1876,101 @@ static void mgmt_device_found(uint16_t index, uint16_t length,
 
 static void mgmt_debug(const char *str, void *user_data)
 {
-    //const char *prefix = user_data;
-
     DBG("%s%s", (const char *)user_data, str);
 }
 
-static void mgmt_setup(unsigned int idx)
+static void mgmt_setup(void)
 {
     mgmt_master = mgmt_new_default();
+
     if (!mgmt_master) {
         DBG("Could not connect to the BT management interface, try with su rights");
-        return;
-    }
-    DBG("Setting up mgmt on hci%u", idx);
-    mgmt_ind = idx;
-    mgmt_set_debug(mgmt_master, mgmt_debug, "mgmt: ", NULL);
 
-    if (mgmt_send(mgmt_master, MGMT_OP_READ_VERSION,
-        MGMT_INDEX_NONE, 0, NULL,
-        read_version_complete, NULL, NULL) == 0) {
-        DBG("mgmt_send(MGMT_OP_READ_VERSION) failed");
-    }
+    } else {
+        mgmt_set_debug(mgmt_master, mgmt_debug, "mgmt: ", NULL);
 
-    if (!mgmt_register(mgmt_master, MGMT_EV_DEVICE_CONNECTED, mgmt_ind, mgmt_device_connected, NULL, NULL)) {
-        DBG("mgmt_register(MGMT_EV_DEVICE_CONNECTED) failed");
-    }
+        /* For READ_VERSION, it is mandatory to use INDEX_NONE */
+        if (!mgmt_send(mgmt_master, MGMT_OP_READ_VERSION, MGMT_INDEX_NONE,
+                0, NULL, read_version_complete, NULL, NULL)) {
+            DBG("mgmt_send(MGMT_OP_READ_VERSION) failed");
+        }
 
-    if (!mgmt_register(mgmt_master, MGMT_EV_DISCOVERING, mgmt_ind, mgmt_scanning, NULL, NULL)) {
-        DBG("mgmt_register(MGMT_EV_DISCOVERING) failed");
-    }
+        if (!mgmt_register(mgmt_master, MGMT_EV_DEVICE_CONNECTED, opt_src_idx,
+                mgmt_device_connected, NULL, NULL)) {
+            DBG("mgmt_register(MGMT_EV_DEVICE_CONNECTED) failed");
+        }
 
-    if (!mgmt_register(mgmt_master, MGMT_EV_DEVICE_FOUND, mgmt_ind, mgmt_device_found, NULL, NULL)) {
-        DBG("mgmt_register(MGMT_EV_DEVICE_FOUND) failed");
+        if (!mgmt_register(mgmt_master, MGMT_EV_DEVICE_DISCONNECTED, opt_src_idx,
+                mgmt_device_disconnected, NULL, NULL)) {
+            DBG("mgmt_register(MGMT_EV_DEVICE_DISCONNECTED) failed");
+        }
+
+        if (!mgmt_register(mgmt_master, MGMT_EV_DISCOVERING, opt_src_idx,
+                mgmt_scanning, NULL, NULL)) {
+            DBG("mgmt_register(MGMT_EV_DISCOVERING) failed");
+        }
+
+        if (!mgmt_register(mgmt_master, MGMT_EV_DEVICE_FOUND, opt_src_idx,
+                mgmt_device_found, NULL, NULL)) {
+            DBG("mgmt_register(MGMT_EV_DEVICE_FOUND) failed");
+        }
     }
 }
 
-int main(int argc, char *argv[])
+static int parse_dev_src(const char * arg, gchar **addr, int *index)
+{
+    char *end;
+    struct hci_dev_info di = { 0 };
+
+    if (strncmp(arg, "hci", 3))
+        return -1;
+
+    *index = strtol(arg + 3, &end, 10);
+    if (*end != '\0')
+        return -1;
+
+    if (hci_devinfo(*index, &di))
+        return -1;
+
+    DBG("devinfo: %02x:%02x:%02x:%02x:%02x:%02x  hci%d  '%s'  f:0x%08x  t:%s",
+        di.bdaddr.b[5], di.bdaddr.b[4], di.bdaddr.b[3], di.bdaddr.b[2], di.bdaddr.b[1], di.bdaddr.b[0],
+        di.dev_id, di.name, di.flags, di.type == BDADDR_LE_PUBLIC?"public":"random");
+
+    *addr = g_malloc(18);
+    if (*addr == NULL)
+        return -2;
+
+    if (ba2str(&di.bdaddr, *addr) != 17)
+        return -2;
+
+    return 0;
+}
+
+int main(int argc, char ** argv)
 {
     GIOChannel *pchan;
     gint events;
+    const char *hci = "hci0";
 
     opt_sec_level = g_strdup("low");
 
-    opt_src = NULL;
+    if (argc > 1)
+        hci = argv[1];
+
+    if (parse_dev_src(hci, &opt_src, &opt_src_idx)) {
+        fprintf(stderr,"%s: expected optional argument 'hciX' valid and up\n", argv[0]);
+        resp_error(err_BAD_HCI);
+        return EXIT_FAILURE;
+    }
+
+    DBG("Using controller hci%d  addr:%s", opt_src_idx, opt_src);
+
     opt_dst = NULL;
     opt_dst_type = g_strdup("public");
 
     DBG(__FILE__ " built at " __TIME__ " on " __DATE__);
 
-    if (argc > 1) {
-        int index;
-
-        if (sscanf (argv[1], "%i", &index)!=1) { 
-            DBG("error converting argument: %s  to device index integer",argv[1]);
-        } else {
-            mgmt_setup(index);
-        }
-    }
+    mgmt_setup();
 
     event_loop = g_main_loop_new(NULL, FALSE);
 
@@ -1892,10 +1990,11 @@ int main(int argc, char *argv[])
 
     g_free(opt_src);
     g_free(opt_dst);
+    g_free(opt_dst_type);
     g_free(opt_sec_level);
 
-    mgmt_unregister_index(mgmt_master, mgmt_ind);
-    mgmt_cancel_index(mgmt_master, mgmt_ind);
+    mgmt_unregister_index(mgmt_master, opt_src_idx);
+    mgmt_cancel_index(mgmt_master, opt_src_idx);
     mgmt_unref(mgmt_master);
     mgmt_master = NULL;
 
